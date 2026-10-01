@@ -71,6 +71,21 @@ nix build -f . fluxdown-server --no-link
 nix build -f . --no-link
 ```
 
+## LLM-assisted maintenance
+
+The project skill [nur-package-update](.agents/skills/nur-package-update/SKILL.md)
+guides release review, contract-change handling, validation, and reporting. Ask
+an agent to update a package or check its upstream release. Crush discovers the
+skill under `.agents/skills/`; `AGENTS.md` also points agents to it explicitly.
+No global skill installation or additional Crush configuration is required.
+
+The skill calls the existing `just` commands rather than replacing them. Keep
+package-specific exceptions in package READMEs and executable maintenance rules
+in `maintenance.toml` and the updater. Its
+[evaluation scenarios](.agents/skills/nur-package-update/evals/evals.json) cover
+an already-current package, a compatible update, and a contract review gate.
+These scenarios have not yet completed an LLM behavior evaluation.
+
 ## Adding maintenance support
 
 Add `pkgs/<name>/maintenance.toml`:
