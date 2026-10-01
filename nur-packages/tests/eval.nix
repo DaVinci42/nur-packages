@@ -44,7 +44,65 @@ let
       environmentFile = "relative.env";
     };
   };
+  schema = builtins.fromJSON (builtins.readFile ../pkgs/fluxdown-server/settings-schema.json);
+  writable = lib.filterAttrs (_: field: field.kind != "ReadOnly") schema.fields;
+  allDefaults = lib.mapAttrs (
+    _: field:
+    if
+      builtins.elem field.kind [
+        "Bool"
+        "Integer"
+        "Float"
+      ]
+    then
+      builtins.fromJSON field.default
+    else
+      field.default
+  ) writable;
+  configured = evaluate {
+    services.fluxdown = {
+      enable = true;
+      settings = allDefaults // {
+        upload_limit_bytes = 1048576;
+      };
+      settingsFile = "/run/secrets/fluxdown-settings.json";
+    };
+  };
+  invalidSetting =
+    name: value:
+    let
+      result = evaluate { services.fluxdown.settings.${name} = value; };
+    in
+    !(builtins.tryEval (builtins.deepSeq result.services.fluxdown.settings true)).success;
+  wrongVersion = evaluate {
+    services.fluxdown = {
+      enable = true;
+      package = pkgs.hello;
+      settings.upload_limit_bytes = 1;
+    };
+  };
   checks = {
+    allWritableSettings =
+      builtins.attrNames enabled.services.fluxdown.settings == builtins.attrNames writable;
+    allDefaultsValid = builtins.deepSeq configured.services.fluxdown.settings true;
+    omittedSettingsUnmanaged = lib.all (value: value == null) (
+      builtins.attrValues enabled.services.fluxdown.settings
+    );
+    noSettingsHookByDefault = enabled.systemd.services.fluxdown.postStart == "";
+    settingsHook =
+      lib.hasInfix "fluxdown-configure.py" configured.systemd.services.fluxdown.postStart
+      && lib.hasInfix "--settings-file" configured.systemd.services.fluxdown.postStart;
+    rejectUnknownSetting = invalidSetting "unknown" 1;
+    rejectReadonlySetting = invalidSetting "domain_conn_caps" "x";
+    rejectNegativeLimit = invalidSetting "upload_limit_bytes" (-1);
+    rejectBooleanLimit = invalidSetting "upload_limit_bytes" true;
+    rejectInvalidEnum = invalidSetting "bt_mse_mode" "unknown";
+    rejectStringBoolean = invalidSetting "bt_enable_upnp" "false";
+    rejectRange = invalidSetting "max_concurrent_tasks" 1025;
+    rejectNegativeFloat = invalidSetting "bt_seed_ratio_limit" (-0.1);
+    rejectVersionDrift = lib.any (
+      item: !item.assertion && lib.hasPrefix "FluxDown settings schema" item.message
+    ) wrongVersion.assertions;
     moduleWithoutPkgs = builtins.isPath (import ../default.nix { pkgs = null; }).nixosModules.fluxdown;
     disabledService = !(disabled.systemd.services ? fluxdown);
     disabledUser = !(disabled.users.users ? fluxdown);

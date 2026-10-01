@@ -6,6 +6,12 @@
 }:
 let
   cfg = config.services.fluxdown;
+  schemaPath = ../pkgs/fluxdown-server/settings-schema.json;
+  schema = builtins.fromJSON (builtins.readFile schemaPath);
+  declaredSettings = lib.filterAttrs (_: value: value != null) cfg.settings;
+  managesSettings = declaredSettings != { } || cfg.settingsFile != null;
+  settingsFile = pkgs.writeText "fluxdown-settings.json" (builtins.toJSON declaredSettings);
+  python = pkgs.python3.withPackages (packages: [ packages.websocket-client ]);
 in
 {
   options.services.fluxdown = {
@@ -32,6 +38,36 @@ in
     };
 
     openFirewall = lib.mkEnableOption "opening the Web UI and API port in the firewall";
+
+    settings = lib.mkOption {
+      type = lib.types.submodule {
+        options = import ./fluxdown-settings.nix { inherit lib; };
+      };
+      default = { };
+      example = {
+        upload_limit_bytes = 1048576;
+        max_concurrent_tasks = 3;
+        bt_enable_upnp = false;
+      };
+      description = ''
+        Writable daemon settings from the pinned upstream configuration catalog.
+        Only non-null values are applied through RPC on each service start.
+        Removing a declaration leaves its last stored value unchanged.
+        Web UI edits to declared keys last until the next service restart.
+        These values enter the Nix store; use settingsFile for secrets.
+      '';
+    };
+
+    settingsFile = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "/.*");
+      default = null;
+      example = "/run/secrets/fluxdown-settings.json";
+      description = ''
+        Runtime JSON object of additional daemon settings, for example proxy
+        credentials or webhook endpoints. Must be readable by the service user.
+        Keys must not also appear in settings. Uses the same types and validation.
+      '';
+    };
 
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
@@ -62,6 +98,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !managesSettings || cfg.package.version == schema.version;
+        message = "FluxDown settings schema must match the package version; regenerate and review the upstream contract.";
+      }
+    ];
+
     users.users.fluxdown = {
       isSystemUser = true;
       group = "fluxdown";
@@ -86,6 +129,13 @@ in
         }
         cfg.environment
       ];
+      postStart = lib.mkIf managesSettings ''
+        ${python}/bin/python3 ${./fluxdown-configure.py} ${settingsFile} ${schemaPath} ${
+          lib.optionalString (
+            cfg.settingsFile != null
+          ) "--settings-file ${lib.escapeShellArg cfg.settingsFile}"
+        }
+      '';
       serviceConfig = {
         ExecStart = "${lib.getExe' cfg.package "fluxdown-agent"} --server";
         User = "fluxdown";

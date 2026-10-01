@@ -38,7 +38,7 @@ Use brackets for IPv6 addresses, such as `[::1]`.
 ## Configuration
 
 The module exposes `enable`, `package`, `listenAddress`, `port`, `openFirewall`,
-`environment`, and `environmentFile`. Additional startup settings:
+`environment`, `environmentFile`, `settings`, and `settingsFile`. Additional startup settings:
 
 | Variable | Purpose |
 | --- | --- |
@@ -56,6 +56,46 @@ Do not override module-managed `FLUXDOWN_BIND` or `FLUXDOWN_DATA_DIR` in runtime
 files. Custom download directories must be writable by the service user;
 home directories are inaccessible by default.
 
+## Declarative daemon settings
+
+`services.fluxdown.settings` exposes all 57 writable entries from upstream
+`DAEMON_CONFIG_FIELDS`: downloads, upload/download limits, concurrency, retries,
+BitTorrent, ED2K, proxies, webhooks, component paths, and logging. Types, bounds,
+enums, and documented upstream defaults come from `settings-schema.json`,
+generated from the packaged release. Read-only fields and unknown keys are rejected.
+
+```nix
+services.fluxdown.settings = {
+  upload_limit_bytes = 1048576;
+  speed_limit_bytes = 0;
+  max_concurrent_tasks = 3;
+  bt_enable_upnp = false;
+  proxy_mode = "none";
+  "component.ffmpeg.path" = "/run/current-system/sw/bin/ffmpeg";
+};
+```
+
+Limits use bytes per second; zero means unlimited. All settings default to `null`,
+meaning unmanaged, not the upstream default. Only declared values are reapplied
+through the official RPC on each start, including restarts after configuration
+changes. Web UI edits to declared keys last until the next restart. Removing a
+key leaves its stored value unchanged; explicitly set its upstream default to
+reset it. Existing downloads are not moved when `default_save_dir` changes.
+
+For passwords or webhook secrets, use `settingsFile`, an absolute path to a
+runtime JSON object with the same keys and JSON value types. Make it readable by
+the service user (for agenix, set the secret owner to `fluxdown` and mode to
+`0400`). Do not duplicate keys between `settings` and `settingsFile`. Unlike
+`environmentFile`, the settings helper reads this file as the service user.
+
+The startup helper authenticates using the local agent token, without requiring
+a Web UI access key or modifying the database. It retries startup and revision
+conflicts, and fails startup if settings cannot be applied. Upstream performs
+additional semantic checks, such as validating component mirror URLs.
+
+This covers daemon configuration, not agent/UI preferences such as automatic
+update checks, cloud accounts, queues, or RSS subscriptions.
+
 ## Maintenance
 
 Follow the package-set `AGENTS.md`. Verify both architecture hashes and that the
@@ -70,13 +110,33 @@ at the packaged tag:
 - `native/agent/src/runtime.rs`, `native/daemon/src/config.rs`: component startup.
 - `native/agent/src/gateway.rs`, `native/protocol/src/rpc.rs`: persistent-setting RPCs.
 
-Complete typed configuration coverage, persistent-setting application, and
-automated upstream drift detection are not yet implemented.
+After changing the package version, regenerate the daemon schema with Python 3
+and an authenticated `gh` CLI, review the diff, and run the checks:
+
+```sh
+python3 nur-packages/pkgs/fluxdown-server/update-settings.py
+python3 nur-packages/pkgs/fluxdown-server/update-settings.py --check
+```
+
+To compare a candidate upstream release without writing files, add
+`--check --ref <tag>`. Differences in the catalog, validation source, or RPC
+protocol source fail the check and print a diff. Unknown catalog syntax also
+fails instead of silently dropping options. The module rejects managed settings
+when its package version differs from the recorded schema version. This is a
+manual check, not a scheduled upstream monitor; it does not cover every upstream
+configuration surface.
 
 Lightweight regression test:
 
 ```sh
 nix-instantiate --eval --strict --expr 'import ./nur-packages/tests/eval.nix {}'
+```
+
+Runtime validation and isolated RPC integration tests (no VM):
+
+```sh
+export FLUXDOWN_TEST_PACKAGE=$(nix build -f ./nur-packages fluxdown-server --no-link --print-out-paths)
+nix-shell -p 'python3.withPackages (p: [ p.websocket-client ])' --run 'PYTHONDONTWRITEBYTECODE=1 python3 nur-packages/tests/settings.py -v'
 ```
 
 Optional VM integration test: `nix-build ./nur-packages/tests/fluxdown.nix`.
