@@ -1,0 +1,100 @@
+# NUR packages
+
+Personal Nix packages and NixOS modules, structured for the Nix User Repository.
+
+## Layout
+
+- `default.nix`: package and module exports, compatible with NUR.
+- `pkgs/<name>/`: package expressions, documentation, and maintenance metadata.
+- `modules/`: NixOS modules, exported as paths under `nixosModules`.
+- `tests/`: lightweight and optional integration tests.
+- `justfile`: shared local and CI entry points.
+- `shell.nix`: maintenance tools from the caller's `<nixpkgs>`.
+- `tools/maintain.py`: isolated update orchestration.
+- `AGENTS.md`: maintenance and commit conventions.
+
+## Packages
+
+| Package | NixOS module | Documentation |
+| --- | --- | --- |
+| `fluxdown-server` | `nixosModules.fluxdown` | [FluxDown Server](pkgs/fluxdown-server/README.md) |
+
+Dependencies come from the caller's `pkgs`; module exports also work with
+`pkgs = null`.
+
+## Update and validate
+
+Enter `nix-shell` from the repository root, then use:
+
+```sh
+just update fluxdown-server
+just update fluxdown-server 0.5.1
+just check fluxdown-server
+just contract fluxdown-server
+just check-all
+```
+
+Or run a single command with `nix-shell --run 'just update fluxdown-server'`.
+Nix needs `nix-command` and `<nixpkgs>`. Upstream contract checks use `gh`
+authentication. `just --list` shows all commands.
+
+The update flow runs in a temporary copy of the current working files:
+
+1. Select a target version once with `nix-update`.
+2. Refresh source hashes for every declared platform, including the first one.
+3. Regenerate and check the package's upstream configuration contract, if present.
+4. Print the diff. Contract changes stop the update for review.
+5. Build on the current platform, run package tests and lint, then copy only
+   declared update files back. Validation failures leave working files unchanged.
+
+After reviewing a contract diff, explicitly accept a specific version:
+
+```sh
+just update-reviewed fluxdown-server 0.5.1
+```
+
+This still runs all validation. It does not prove upstream behavior is compatible;
+review the release notes and any changed types, defaults, validation, and protocol.
+Updates never commit, push, or activate services. Concurrent working-file changes
+are detected before writeback. Avoid editing the repository during updates.
+
+`just check` builds and tests without network contract queries; `just contract`
+checks upstream without modifying files. CI uses `just check-all`, without VMs.
+Only the current platform is build-tested. For flat binary archives, hashes for
+other platforms are fetched on the local machine without foreign builders.
+Generic source/dependency updates use `nix-update` and may need other builders.
+
+To build without the maintenance tools:
+
+```sh
+nix build -f . fluxdown-server --no-link
+nix build -f . --no-link
+```
+
+## Adding maintenance support
+
+Add `pkgs/<name>/maintenance.toml`:
+
+- `files`: package-relative files the updater may modify.
+- `rawSource` (optional): file holding unique source hashes for a flat `fetchurl`
+  package. Uses local prefetching for each architecture; omit for source packages.
+- `sync` / `contract` (optional): argument arrays for generating/checking contracts.
+- `tests` (optional): arrays of test commands, executed from the repository root.
+- `runtimePackageEnv` (optional): environment variable receiving the built package
+  path for isolated runtime tests.
+
+JSON files ending in `-schema.json` are compared before and after generation;
+changes other than their top-level version require explicit review. Other contract
+formats need a corresponding comparison before claiming equivalent protection.
+Metadata commands are trusted repository code, not a security sandbox.
+
+## Registration
+
+This repository is not registered in public NUR. Submit a separate PR to the
+NUR index adding the repository URL to `repos.json`; no `file` field is needed.
+
+## Migration
+
+Consumers using a non-flake input must now import `${input}/modules/fluxdown.nix`.
+Update the input lock and import path together after this change is published.
+Configurations pinned to older commits continue to use their old paths.
