@@ -18,6 +18,9 @@ check package:
 check-all:
     python3 tools/maintain.py check-all
 
+check-updates *args:
+    python3 tools/check_updates.py "$@"
+
 contract package:
     python3 tools/maintain.py contract "$1"
 

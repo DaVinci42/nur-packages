@@ -71,6 +71,43 @@ nix build -f . fluxdown-server --no-link
 nix build -f . --no-link
 ```
 
+## Scheduled package updates
+
+`Package updates` runs at 00:00, 06:00, 12:00, and 18:00 UTC, or by manual
+dispatch on the default branch. It uses `self-hosted` in `DaVinci42/nur-packages` with Nix,
+`nix-command`, `<nixpkgs>`, and GitHub access. Schedules may be delayed and must
+be enabled on the default branch. Keep this runner isolated from untrusted PRs.
+
+Each `pkgs/*/maintenance.toml` declares `[release]` with a GitHub `repository`
+(`owner/repository`) and required `assets` (filenames with optional `{version}`).
+The latest stable `vX.Y.Z` or `X.Y.Z` must be newer than the packaged version and
+have all required assets uploaded and nonempty. Otherwise the job skips it.
+Errors stop immediately; contract changes require manual review.
+
+Each update uses an isolated worktree and the existing `just update` validation.
+Only declared package files are committed and pushed to a version-specific branch.
+The PR title is `package: old-version -> new-version`; its body lists actual
+checks and untested platforms. Existing PRs, including closed ones, are not
+recreated. Branch conflicts fail without force-pushing; a pushed branch whose PR
+creation failed can be opened manually. Packages never share update commits. No Issues are created or PRs auto-merged.
+
+`GITHUB_TOKEN` needs `contents: write`, `pull-requests: write`, and the repository
+setting allowing Actions to create pull requests. Its PRs do not trigger further
+workflows; checks already run before publication. Set optional `UPDATE_TOKEN`
+(a GitHub App or scoped PAT) if PR-triggered CI is required. Git identity comes
+from environment variables, not Git configuration.
+
+```sh
+nix-shell --run 'just check-updates'          # Read-only asset readiness
+nix-shell --run 'just check-updates --update' # Update and validate, no commit
+```
+
+The workflow uses `--pr` to publish; it requires a clean checkout,
+`GITHUB_REPOSITORY`, and `UPDATE_BASE`. Local `act` runs use `--update`, never
+commit, push, or open PRs. `just check-all` includes monitor regression tests.
+Readiness does not separately download archives or verify an upstream checksum
+manifest; source fetching and hash validation belong to the shared updater.
+
 ## LLM-assisted maintenance
 
 The project skill [nur-package-update](.agents/skills/nur-package-update/SKILL.md)

@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = {".git", ".crush", ".ruff_cache", ".mypy_cache", "__pycache__"}
 
 
+class ReleaseSpecification(TypedDict):
+    repository: str
+    assets: list[str]
+
+
 class Specification(TypedDict):
     files: list[str]
     sync: NotRequired[list[str]]
@@ -23,6 +28,7 @@ class Specification(TypedDict):
     tests: NotRequired[list[list[str]]]
     runtimePackageEnv: NotRequired[str]
     rawSource: NotRequired[str]
+    release: NotRequired[ReleaseSpecification]
 
 
 class Arguments(argparse.Namespace):
@@ -50,6 +56,26 @@ def run(
     return result.stdout.strip() if capture else ""
 
 
+def string_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(cast(list[object], value))
+        and all(isinstance(item, str) for item in cast(list[object], value))
+    )
+
+
+def validate_release(release: dict[str, object]) -> None:
+    repository = release.get("repository")
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
+    ):
+        raise ValueError("release.repository must be owner/repository")
+    if not string_list(release.get("assets")):
+        raise ValueError("release.assets must be a nonempty list of filenames")
+    if set(release) - {"repository", "assets"}:
+        raise ValueError("Unknown release metadata fields")
+
+
 def specification(root: Path, package: str) -> Specification:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", package):
         raise ValueError("Invalid package name")
@@ -57,13 +83,6 @@ def specification(root: Path, package: str) -> Specification:
     raw = cast(
         dict[str, object], tomllib.loads((folder / "maintenance.toml").read_text())
     )
-
-    def string_list(value: object) -> bool:
-        return (
-            isinstance(value, list)
-            and bool(cast(list[object], value))
-            and all(isinstance(item, str) for item in cast(list[object], value))
-        )
 
     if not string_list(raw.get("files")):
         raise ValueError("files must be a nonempty list of strings")
@@ -79,8 +98,20 @@ def specification(root: Path, package: str) -> Specification:
     for key in ("runtimePackageEnv", "rawSource"):
         if key in raw and not isinstance(raw[key], str):
             raise ValueError(key + " must be a string")
+    if "release" in raw:
+        if not isinstance(raw["release"], dict):
+            raise ValueError("release must be a table")
+        validate_release(cast(dict[str, object], raw["release"]))
     spec = cast(Specification, cast(object, raw))
-    allowed = {"files", "sync", "contract", "tests", "runtimePackageEnv", "rawSource"}
+    allowed = {
+        "files",
+        "sync",
+        "contract",
+        "tests",
+        "runtimePackageEnv",
+        "rawSource",
+        "release",
+    }
     if set(spec) - allowed:
         raise ValueError("Unknown maintenance metadata fields")
     for name in spec["files"]:
@@ -381,11 +412,12 @@ def main() -> None:
         elif args.action == "check-all":
             for path in sorted((ROOT / "pkgs").glob("*/maintenance.toml")):
                 check(ROOT, path.parent.name, specification(ROOT, path.parent.name))
-            _ = run(
-                ROOT,
-                ["python3", "tests/maintenance.py", "-v"],
-                env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"},
-            )
+            for test in ("maintenance", "updates"):
+                _ = run(
+                    ROOT,
+                    ["python3", f"tests/{test}.py", "-v"],
+                    env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"},
+                )
         elif not args.package:
             parser.error("package is required")
         elif args.action == "update":
