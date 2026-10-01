@@ -5,8 +5,8 @@
 - Keep module exports evaluable with `pkgs = null`; use the caller's `pkgs`.
 - Write documentation in English. Put package-specific usage and maintenance
   notes in `pkgs/<name>/README.md`, not in this file.
-- Do not modify the central index, consuming configurations, or running services
-  unless requested. Keep secrets outside the Nix store.
+- Do not modify consuming configurations or running services unless requested.
+  Keep secrets outside the Nix store.
 
 ## Commit style
 
@@ -18,10 +18,10 @@ explicitly requested; use `--force-with-lease` for authorized history rewrites.
 
 ## Updates
 
-AI agents should follow the `Update and validate` section in `README.md` for
-update commands and read the target package's README for exceptions. Refresh
-hashes for every supported platform; do not treat an updater's success as proof
-of build success or configuration compatibility.
+Use `nix-shell --run 'just update <name>'` and the package's `maintenance.toml`.
+Read the package README for exceptions. Review contract changes before using
+`just update-reviewed <name> <version>`; never bypass a failed check merely to
+finish an update. Only the current platform is build-tested.
 
 1. Verify the upstream release and review changes since the packaged version.
 2. Update the version and all supported source hashes together. Check archive
@@ -34,10 +34,11 @@ of build success or configuration compatibility.
 
 ## Validation
 
-From the repository root, build the changed package with
-`nix build -f ./nur-packages <name> --no-link`, run its lightweight tests,
-then run `nixfmt --check` on changed Nix files, `statix check nur-packages`,
-and `deadnix --fail nur-packages`.
+Run `nix-shell --run 'just check <name>'` for a package or `just check-all` for
+all maintenance targets and updater tests. CI uses the same entry point.
+Python changes must pass basedpyright with zero errors and warnings; `just lint`
+runs it for every Python file using the shell's interpreter and dependencies.
+`just contract <name>` checks the pinned upstream contract without rewriting it.
 
 Run VM tests only when requested. Isolate runtime tests from existing services
 and data. Report what was verified and what remains untested.

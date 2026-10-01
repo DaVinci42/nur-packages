@@ -8,12 +8,12 @@ Pinned upstream binaries for `x86_64-linux` and `aarch64-linux`, including
 Run commands from the repository root. Adjust the import path to your configuration:
 
 ```sh
-nix-build ./nur-packages -A fluxdown-server --no-out-link
+nix-build . -A fluxdown-server --no-out-link
 ```
 
 ```nix
 {
-  imports = [ ./nur-packages/modules/fluxdown.nix ];
+  imports = [ ./modules/fluxdown.nix ];
   services.fluxdown = {
     enable = true;
     environmentFile = "/run/secrets/fluxdown.env";
@@ -116,13 +116,18 @@ at the packaged tag:
 - `native/agent/src/runtime.rs`, `native/daemon/src/config.rs`: component startup.
 - `native/agent/src/gateway.rs`, `native/protocol/src/rpc.rs`: persistent-setting RPCs.
 
-After changing the package version, regenerate the daemon schema with Python 3
-and an authenticated `gh` CLI, review the diff, and run the checks:
+Use the shared maintenance flow in `nix-shell` (requires authenticated `gh`):
 
 ```sh
-python3 nur-packages/pkgs/fluxdown-server/update-settings.py
-python3 nur-packages/pkgs/fluxdown-server/update-settings.py --check
+just update fluxdown-server
+just contract fluxdown-server
+just check fluxdown-server
 ```
+
+The package's `maintenance.toml` selects flat-archive hash updates, schema
+regeneration, Nix evaluation, and isolated RPC tests. Contract changes require
+review with `just update-reviewed fluxdown-server <version>`. The lower-level
+`python3 pkgs/fluxdown-server/update-settings.py --check` remains available.
 
 To compare a candidate upstream release without writing files, add
 `--check --ref <tag>`. Differences in the catalog, validation source, or RPC
@@ -135,16 +140,16 @@ configuration surface.
 Lightweight regression test:
 
 ```sh
-nix-instantiate --eval --strict --expr 'import ./nur-packages/tests/eval.nix {}'
+nix-instantiate --eval --strict --expr 'import ./tests/eval.nix {}'
 ```
 
 Runtime validation and isolated RPC integration tests (no VM):
 
 ```sh
-export FLUXDOWN_TEST_PACKAGE=$(nix build -f ./nur-packages fluxdown-server --no-link --print-out-paths)
-nix-shell -p 'python3.withPackages (p: [ p.websocket-client ])' --run 'PYTHONDONTWRITEBYTECODE=1 python3 nur-packages/tests/settings.py -v'
+export FLUXDOWN_TEST_PACKAGE=$(nix build -f . fluxdown-server --no-link --print-out-paths)
+nix-shell -p 'python3.withPackages (p: [ p.websocket-client ])' --run 'PYTHONDONTWRITEBYTECODE=1 python3 tests/settings.py -v'
 ```
 
-Optional VM integration test: `nix-build ./nur-packages/tests/fluxdown.nix`.
+Optional VM integration test: `nix-build ./tests/fluxdown.nix`.
 It checks startup, Web UI, key persistence, and shutdown; first-run dependencies
 can be large.

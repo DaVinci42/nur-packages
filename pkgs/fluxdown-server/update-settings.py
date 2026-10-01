@@ -6,16 +6,20 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 SOURCES = ["native/protocol/src/daemon_config.rs", "native/protocol/src/rpc.rs"]
 
 
-def parse_fields(source):
+def parse_fields(source: str) -> dict[str, dict[str, object]]:
     source = re.sub(r"//[^\n]*", "", source)
     enums = {
-        name: json.loads("[" + values + "]")
-        for name, values in re.findall(
-            r"pub const (\w+): &\[&str\] = &\[([^\]]*)\];", source
+        name: cast(list[str], json.loads("[" + values + "]"))
+        for name, values in (
+            (match.group(1), match.group(2))
+            for match in re.finditer(
+                r"pub const (\w+): &\[&str\] = &\[([^\]]*)\];", source
+            )
         )
     }
     catalog = (
@@ -25,26 +29,31 @@ def parse_fields(source):
     )
     pattern = re.compile(
         r'\s*field\(\s*("[^"\\]*")\s*,\s*DaemonConfigKind::'
-        r"(Bool|Integer|Float|Enum|Text|ReadOnly)\s*"
-        r'(\{[^}]*\}|\([^)]*\))?\s*,\s*("[^"\\]*")\s*,?\s*\)\s*,?'
+        + r"(Bool|Integer|Float|Enum|Text|ReadOnly)\s*"
+        + r'(\{[^}]*\}|\([^)]*\))?\s*,\s*("[^"\\]*")\s*,?\s*\)\s*,?'
     )
-    fields = {}
+    fields: dict[str, dict[str, object]] = {}
     while catalog.strip():
         match = pattern.match(catalog)
         if match is None:
             raise ValueError("Unrecognized upstream configuration syntax")
-        key, kind, constraints, default = match.groups()
-        key = json.loads(key)
+        key, kind, constraints, default = (match.group(index) for index in range(1, 5))
+        key = cast(str, json.loads(key))
         if key in fields:
             raise ValueError("Duplicate upstream key: " + key)
-        field = {"kind": kind, "default": json.loads(default)}
+        field: dict[str, object] = {
+            "kind": kind,
+            "default": cast(str, json.loads(default)),
+        }
         if kind in ("Integer", "Float"):
             for part in constraints.strip("{} ").split(","):
                 if part.strip():
                     name, value = part.strip().split(":", 1)
                     value = value.strip().replace("_", "")
                     field[name] = (
-                        (2**63 - 1) if value == "i64::MAX" else json.loads(value)
+                        9223372036854775807
+                        if value == "i64::MAX"
+                        else cast(int | float, json.loads(value))
                     )
         elif kind == "Enum":
             field["values"] = enums[constraints.strip("() ")]
@@ -55,7 +64,7 @@ def parse_fields(source):
     return fields
 
 
-def generate(ref):
+def generate(ref: str) -> dict[str, object]:
     sources = {
         path: subprocess.check_output(
             [
@@ -85,23 +94,29 @@ def generate(ref):
     }
 
 
-def main():
+class Arguments(argparse.Namespace):
+    ref: str | None = None
+    check: bool = False
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate or check the pinned FluxDown daemon configuration contract"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--ref", help="Upstream tag or revision; defaults to the package version"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--check",
         action="store_true",
         help="Fail on upstream contract drift without modifying files",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=Arguments())
     folder = Path(__file__).resolve().parent
-    version = re.search(
-        r'version = "([^"]+)";', (folder / "default.nix").read_text()
-    ).group(1)
+    match = re.search(r'version = "([^"]+)";', (folder / "default.nix").read_text())
+    if match is None:
+        raise ValueError("Cannot determine package version")
+    version = match.group(1)
     content = (
         json.dumps(generate(args.ref or "v" + version), indent=2, sort_keys=True) + "\n"
     )
@@ -109,7 +124,7 @@ def main():
     if args.check:
         previous = target.read_text()
         if previous != content:
-            sys.stdout.writelines(
+            _ = sys.stdout.writelines(
                 difflib.unified_diff(
                     previous.splitlines(True),
                     content.splitlines(True),
@@ -120,7 +135,7 @@ def main():
             return 1
         print("Upstream daemon configuration contract matches")
     else:
-        target.write_text(content)
+        _ = target.write_text(content)
     return 0
 
 

@@ -4,19 +4,62 @@ import math
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import NotRequired, Protocol, TypedDict, cast
 
 import websocket
+
+
+class Field(TypedDict):
+    kind: str
+    default: str
+    min: NotRequired[int | float]
+    max: NotRequired[int]
+    values: NotRequired[list[str]]
+
+
+class Schema(TypedDict):
+    fields: dict[str, Field]
+    protocolVersion: int
+
+
+class Connection(Protocol):
+    def send(self, payload: str) -> object: ...
+    def settimeout(self, timeout: float) -> None: ...
+    def recv(self) -> str | bytes: ...
+    def close(self) -> None: ...
+
+
+class ConnectionFactory(Protocol):
+    def __call__(self, url: str, **options: object) -> Connection: ...
+
+
+def connect(url: str, **options: object) -> Connection:
+    factory = cast(ConnectionFactory, websocket.create_connection)
+    return factory(url, **options)
 
 
 class ConfigurationError(Exception):
     pass
 
 
+def object_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ConfigurationError("Expected a JSON object")
+    return cast(dict[str, object], value)
+
+
+def read_object(path: str | Path) -> dict[str, object]:
+    return object_dict(cast(object, json.loads(Path(path).read_text())))
+
+
 class RpcError(Exception):
-    def __init__(self, error):
-        data = error.get("data", {})
-        self.retryable = data.get("retryable", False) or data.get("code") in (
+    retryable: bool
+
+    def __init__(self, error: Mapping[str, object]) -> None:
+        data = object_dict(error.get("data", {}))
+        self.retryable = data.get("retryable") is True or data.get("code") in (
             "conflict",
             "unavailable",
             "timeout",
@@ -24,18 +67,18 @@ class RpcError(Exception):
         super().__init__("FluxDown rejected the settings RPC")
 
 
-def load_settings(declared, secret_file, schema):
+def load_settings(
+    declared: Mapping[str, object], secret_file: str | Path | None, schema: Schema
+) -> dict[str, str]:
     values = dict(declared)
     if secret_file:
-        private = json.loads(Path(secret_file).read_text())
-        if not isinstance(private, dict):
-            raise ConfigurationError("settingsFile must contain a JSON object")
+        private = read_object(secret_file)
         if values.keys() & private.keys():
             raise ConfigurationError(
                 "settings and settingsFile must not contain duplicate keys"
             )
         values.update(private)
-    result = {}
+    result: dict[str, str] = {}
     for name, value in values.items():
         field = schema["fields"].get(name)
         if field is None or field["kind"] == "ReadOnly":
@@ -46,15 +89,17 @@ def load_settings(declared, secret_file, schema):
         if kind == "Bool":
             valid = type(value) is bool
         elif kind == "Integer":
-            valid = type(value) is int and field["min"] <= value <= field["max"]
+            valid = type(value) is int and field.get("min", 0) <= value <= field.get(
+                "max", 9223372036854775807
+            )
         elif kind == "Float":
             valid = (
                 type(value) in (int, float)
-                and math.isfinite(value)
-                and value >= field["min"]
+                and math.isfinite(cast(int | float, value))
+                and cast(int | float, value) >= field.get("min", 0)
             )
         elif kind == "Enum":
-            valid = isinstance(value, str) and value in field["values"]
+            valid = isinstance(value, str) and value in field.get("values", [])
         else:
             valid = isinstance(value, str)
         if not valid:
@@ -64,37 +109,52 @@ def load_settings(declared, secret_file, schema):
 
 
 class RpcClient:
-    def __init__(self, connection):
+    connection: Connection
+    sequence: int
+
+    def __init__(self, connection: Connection) -> None:
         self.connection = connection
         self.sequence = 0
 
-    def call(self, method, params=None):
+    def call(
+        self, method: str, params: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
         self.sequence += 1
-        request = {"jsonrpc": "2.0", "id": self.sequence, "method": method}
+        request: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": self.sequence,
+            "method": method,
+        }
         if params is not None:
             request["params"] = params
-        self.connection.send(json.dumps(request))
+        _ = self.connection.send(json.dumps(request))
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             self.connection.settimeout(max(0.01, deadline - time.monotonic()))
-            response = json.loads(self.connection.recv())
+            response = object_dict(cast(object, json.loads(self.connection.recv())))
             if response.get("id") != self.sequence:
                 continue
             if "error" in response:
-                raise RpcError(response["error"])
-            return response["result"]
+                raise RpcError(object_dict(response["error"]))
+            return object_dict(response["result"])
         raise TimeoutError("RPC response timed out")
 
 
-def apply_settings(url, token_file, values, protocol, timeout=45):
+def apply_settings(
+    url: str,
+    token_file: str | Path,
+    values: Mapping[str, str],
+    protocol: int,
+    timeout: float = 45,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        connection = None
+        connection: Connection | None = None
         try:
             token = Path(token_file).read_text().strip()
             if not token:
                 raise OSError("Agent token is not ready")
-            connection = websocket.create_connection(
+            connection = connect(
                 url,
                 header={"Authorization": "Bearer " + token},
                 suppress_origin=True,
@@ -102,7 +162,7 @@ def apply_settings(url, token_file, values, protocol, timeout=45):
                 http_no_proxy=["*"],
             )
             client = RpcClient(connection)
-            client.call(
+            _ = client.call(
                 "system.hello",
                 {
                     "clientName": "nixos-settings",
@@ -114,21 +174,22 @@ def apply_settings(url, token_file, values, protocol, timeout=45):
                 },
             )
             snapshot = client.call("daemon.config.get")
+            stored = object_dict(snapshot["values"])
             changes = {
                 name: value
                 for name, value in values.items()
-                if snapshot["values"].get(name) != value
+                if stored.get(name) != value
             }
             if changes:
-                client.call(
+                _ = client.call(
                     "daemon.config.patch",
                     {"expectedRevision": snapshot["revision"], "values": changes},
                 )
             auto_resume = values.get(
-                "auto_resume_on_start", snapshot["values"].get("auto_resume_on_start")
+                "auto_resume_on_start", str(stored.get("auto_resume_on_start", "false"))
             )
             if auto_resume in ("true", "1"):
-                client.call("daemon.task.resumeAll")
+                _ = client.call("daemon.task.resumeAll")
             return
         except RpcError as error:
             if not error.retryable:
@@ -144,7 +205,7 @@ def apply_settings(url, token_file, values, protocol, timeout=45):
     raise ConfigurationError("Timed out applying settings to FluxDown")
 
 
-def runtime_endpoint():
+def runtime_endpoint() -> tuple[str, str]:
     bind = os.environ.get("FLUXDOWN_BIND", "127.0.0.1:17800")
     host, port = bind.rsplit(":", 1)
     host = {"0.0.0.0": "127.0.0.1", "[::]": "[::1]"}.get(host, host)
@@ -156,17 +217,21 @@ def runtime_endpoint():
     return f"ws://{host}:{port}/rpc", token_file
 
 
-def main():
+class Arguments(argparse.Namespace):
+    settings: str = ""
+    schema: str = ""
+    settings_file: str | None = None
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("settings")
-    parser.add_argument("schema")
-    parser.add_argument("--settings-file")
-    args = parser.parse_args()
+    _ = parser.add_argument("settings")
+    _ = parser.add_argument("schema")
+    _ = parser.add_argument("--settings-file")
+    args = parser.parse_args(namespace=Arguments())
     try:
-        schema = json.loads(Path(args.schema).read_text())
-        values = load_settings(
-            json.loads(Path(args.settings).read_text()), args.settings_file, schema
-        )
+        schema = cast(Schema, cast(object, read_object(args.schema)))
+        values = load_settings(read_object(args.settings), args.settings_file, schema)
         if values:
             url, token_file = runtime_endpoint()
             apply_settings(url, token_file, values, schema["protocolVersion"])

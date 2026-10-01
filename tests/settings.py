@@ -4,33 +4,109 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import ModuleType
+from typing import NotRequired, Protocol, TypedDict, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_module(name, path):
+class Field(TypedDict):
+    kind: str
+    default: str
+    min: NotRequired[int | float]
+    max: NotRequired[int]
+    values: NotRequired[list[str]]
+
+
+class Schema(TypedDict):
+    fields: dict[str, Field]
+    protocolVersion: int
+
+
+class RpcConnection(Protocol):
+    def send(self, payload: str) -> object: ...
+    def settimeout(self, timeout: float) -> None: ...
+    def recv(self) -> str | bytes: ...
+    def close(self) -> None: ...
+
+
+class Client(Protocol):
+    def call(
+        self, method: str, params: Mapping[str, object] | None = None
+    ) -> dict[str, object]: ...
+
+
+class RetryError(Protocol):
+    retryable: bool
+
+
+class Helper(Protocol):
+    ConfigurationError: type[Exception]
+
+    def RpcError(self, error: Mapping[str, object]) -> Exception: ...
+    def RpcClient(self, connection: RpcConnection) -> Client: ...
+    def load_settings(
+        self,
+        declared: Mapping[str, object],
+        secret_file: str | Path | None,
+        schema: Schema,
+    ) -> dict[str, str]: ...
+    def runtime_endpoint(self) -> tuple[str, str]: ...
+    def apply_settings(
+        self,
+        url: str,
+        token_file: str | Path,
+        values: Mapping[str, str],
+        protocol: int,
+        timeout: float = 45,
+    ) -> None: ...
+    def connect(self, url: str, **options: object) -> RpcConnection: ...
+    def object_dict(self, value: object) -> dict[str, object]: ...
+
+
+class Generator(Protocol):
+    def parse_fields(self, source: str) -> dict[str, dict[str, object]]: ...
+
+
+def load_module(name: str, path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load test module: " + name)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-helper = load_module("configure", ROOT / "modules/fluxdown-configure.py")
-generator = load_module("generator", ROOT / "pkgs/fluxdown-server/update-settings.py")
-SCHEMA = json.loads((ROOT / "pkgs/fluxdown-server/settings-schema.json").read_text())
+helper = cast(
+    Helper,
+    cast(object, load_module("configure", ROOT / "modules/fluxdown-configure.py")),
+)
+generator = cast(
+    Generator,
+    cast(
+        object,
+        load_module("generator", ROOT / "pkgs/fluxdown-server/update-settings.py"),
+    ),
+)
+SCHEMA = cast(
+    Schema, json.loads((ROOT / "pkgs/fluxdown-server/settings-schema.json").read_text())
+)
 
 
 class SettingsTests(unittest.TestCase):
     def test_all_defaults(self):
-        values = {}
+        values: dict[str, object] = {}
         for name, field in SCHEMA["fields"].items():
             if field["kind"] != "ReadOnly":
                 values[name] = (
-                    json.loads(field["default"])
+                    cast(object, json.loads(field["default"]))
                     if field["kind"] in ("Bool", "Integer", "Float")
                     else field["default"]
                 )
@@ -52,18 +128,18 @@ class SettingsTests(unittest.TestCase):
                 self.subTest(settings=settings),
                 self.assertRaises(helper.ConfigurationError),
             ):
-                helper.load_settings(settings, None, SCHEMA)
+                _ = helper.load_settings(settings, None, SCHEMA)
 
     def test_secret_file(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
-            path.write_text(json.dumps({"proxy_password": "private-test-value"}))
+            _ = path.write_text(json.dumps({"proxy_password": "private-test-value"}))
             self.assertEqual(
                 helper.load_settings({}, path, SCHEMA),
                 {"proxy_password": "private-test-value"},
             )
             with self.assertRaises(helper.ConfigurationError):
-                helper.load_settings({"proxy_password": "duplicate"}, path, SCHEMA)
+                _ = helper.load_settings({"proxy_password": "duplicate"}, path, SCHEMA)
 
     def test_null_and_endpoints(self):
         self.assertEqual(
@@ -94,18 +170,23 @@ class SettingsTests(unittest.TestCase):
             'field("x", DaemonConfigKind::NewType, ""),',
         ]:
             with self.assertRaises(ValueError):
-                generator.parse_fields(prefix + entry + "];")
+                _ = generator.parse_fields(prefix + entry + "];")
 
     def test_rpc_events_and_error_redaction(self):
         class Connection:
-            def send(self, request):
-                pass
+            responses: Iterator[str] = iter(())
 
-            def settimeout(self, timeout):
-                pass
+            def send(self, payload: str) -> None:
+                _ = payload
 
-            def recv(self):
+            def settimeout(self, timeout: float) -> None:
+                _ = timeout
+
+            def recv(self) -> str:
                 return next(self.responses)
+
+            def close(self) -> None:
+                pass
 
         connection = Connection()
         connection.responses = iter(
@@ -116,16 +197,16 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(helper.RpcClient(connection).call("test"), {"ok": True})
         error = helper.RpcError({"message": "secret", "data": {"code": "conflict"}})
-        self.assertTrue(error.retryable)
+        self.assertTrue(cast(RetryError, cast(object, error)).retryable)
         self.assertNotIn("secret", str(error))
 
     def test_conflict_retry_and_timeout(self):
         with tempfile.TemporaryDirectory() as folder:
             token_file = Path(folder) / "agent.token"
-            token_file.write_text("private-test-token")
+            _ = token_file.write_text("private-test-token")
             conflict = helper.RpcError({"data": {"code": "conflict"}})
             with (
-                patch.object(helper.websocket, "create_connection"),
+                patch.object(helper, "connect"),
                 patch.object(
                     helper.RpcClient,
                     "call",
@@ -138,20 +219,26 @@ class SettingsTests(unittest.TestCase):
                         {},
                     ],
                 ) as calls,
-                patch.object(helper.time, "sleep"),
+                patch.object(time, "sleep"),
             ):
                 helper.apply_settings(
                     "ws://127.0.0.1:1/rpc", token_file, {"upload_limit_bytes": "1"}, 6
                 )
                 self.assertEqual(calls.call_count, 6)
-                self.assertEqual(calls.call_args.args[1]["expectedRevision"], 2)
+                assert calls.call_args is not None
+                self.assertEqual(
+                    cast(dict[str, object], calls.call_args.args[1])[
+                        "expectedRevision"
+                    ],
+                    2,
+                )
             with self.assertRaises(helper.ConfigurationError):
                 helper.apply_settings(
                     "ws://127.0.0.1:1/rpc", token_file, {}, 6, timeout=0
                 )
 
     def test_resume_all_after_configuration(self):
-        cases = [
+        cases: list[tuple[dict[str, str], dict[str, str], bool, bool]] = [
             ({"auto_resume_on_start": "true"}, {}, True, True),
             (
                 {"auto_resume_on_start": "true"},
@@ -170,13 +257,16 @@ class SettingsTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as folder:
             token_file = Path(folder) / "agent.token"
-            token_file.write_text("private-test-token")
+            _ = token_file.write_text("private-test-token")
             for declared, stored, changes, resume in cases:
-                responses = [{}, {"revision": 1, "values": stored}]
+                responses: list[dict[str, object]] = [
+                    {},
+                    {"revision": 1, "values": stored},
+                ]
                 responses += [{}] * (int(changes) + int(resume))
                 with (
                     self.subTest(declared=declared, stored=stored),
-                    patch.object(helper.websocket, "create_connection"),
+                    patch.object(helper, "connect"),
                     patch.object(
                         helper.RpcClient, "call", side_effect=responses
                     ) as calls,
@@ -184,7 +274,7 @@ class SettingsTests(unittest.TestCase):
                     helper.apply_settings(
                         "ws://127.0.0.1:1/rpc", token_file, declared, 6
                     )
-                    methods = [item.args[0] for item in calls.call_args_list]
+                    methods = [cast(str, item.args[0]) for item in calls.call_args_list]
                     expected = ["system.hello", "daemon.config.get"]
                     if changes:
                         expected.append("daemon.config.patch")
@@ -195,9 +285,9 @@ class SettingsTests(unittest.TestCase):
     def test_failed_patch_does_not_resume(self):
         with tempfile.TemporaryDirectory() as folder:
             token_file = Path(folder) / "agent.token"
-            token_file.write_text("private-test-token")
+            _ = token_file.write_text("private-test-token")
             with (
-                patch.object(helper.websocket, "create_connection"),
+                patch.object(helper, "connect"),
                 patch.object(
                     helper.RpcClient,
                     "call",
@@ -217,7 +307,7 @@ class SettingsTests(unittest.TestCase):
                     )
                 self.assertNotIn(
                     "daemon.task.resumeAll",
-                    [item.args[0] for item in calls.call_args_list],
+                    [cast(str, item.args[0]) for item in calls.call_args_list],
                 )
 
     @unittest.skipUnless(
@@ -230,7 +320,8 @@ class SettingsTests(unittest.TestCase):
             for reservation in reservations:
                 reservation.bind(("127.0.0.1", 0))
             port, daemon_port = [
-                reservation.getsockname()[1] for reservation in reservations
+                cast(tuple[str, int], reservation.getsockname())[1]
+                for reservation in reservations
             ]
             for reservation in reservations:
                 reservation.close()
@@ -271,7 +362,7 @@ class SettingsTests(unittest.TestCase):
                         helper.apply_settings(
                             url, token_file, values, SCHEMA["protocolVersion"]
                         )
-                        connection = helper.websocket.create_connection(
+                        connection = helper.connect(
                             url,
                             header={
                                 "Authorization": "Bearer "
@@ -283,7 +374,7 @@ class SettingsTests(unittest.TestCase):
                         )
                         try:
                             client = helper.RpcClient(connection)
-                            client.call(
+                            _ = client.call(
                                 "system.hello",
                                 {
                                     "clientName": "test",
@@ -296,10 +387,16 @@ class SettingsTests(unittest.TestCase):
                             )
                             snapshot = client.call("daemon.config.get")
                             self.assertEqual(
-                                snapshot["values"]["upload_limit_bytes"], "1048576"
+                                helper.object_dict(snapshot["values"])[
+                                    "upload_limit_bytes"
+                                ],
+                                "1048576",
                             )
                             self.assertEqual(
-                                snapshot["values"]["max_concurrent_tasks"], "3"
+                                helper.object_dict(snapshot["values"])[
+                                    "max_concurrent_tasks"
+                                ],
+                                "3",
                             )
                             revision = snapshot["revision"]
                             helper.apply_settings(
@@ -313,12 +410,12 @@ class SettingsTests(unittest.TestCase):
                             )
                             if iteration == 0:
                                 path = Path(folder) / "declared.json"
-                                path.write_text(
+                                _ = path.write_text(
                                     json.dumps({"speed_limit_bytes": 2097152})
                                 )
-                                subprocess.run(
+                                _ = subprocess.run(
                                     [
-                                        os.sys.executable,
+                                        sys.executable,
                                         str(ROOT / "modules/fluxdown-configure.py"),
                                         str(path),
                                         str(
@@ -330,9 +427,9 @@ class SettingsTests(unittest.TestCase):
                                     check=True,
                                 )
                             self.assertEqual(
-                                client.call("daemon.config.get")["values"][
-                                    "speed_limit_bytes"
-                                ],
+                                helper.object_dict(
+                                    client.call("daemon.config.get")["values"]
+                                )["speed_limit_bytes"],
                                 "2097152",
                             )
                             with self.assertRaises(helper.ConfigurationError):
@@ -347,12 +444,12 @@ class SettingsTests(unittest.TestCase):
                     finally:
                         process.send_signal(signal.SIGTERM)
                         try:
-                            process.wait(timeout=15)
+                            _ = process.wait(timeout=15)
                         except subprocess.TimeoutExpired:
                             os.killpg(process.pid, signal.SIGKILL)
-                            process.wait()
+                            _ = process.wait()
                         self.assertEqual(process.returncode, 0)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()
