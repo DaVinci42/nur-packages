@@ -150,6 +150,76 @@ class SettingsTests(unittest.TestCase):
                     "ws://127.0.0.1:1/rpc", token_file, {}, 6, timeout=0
                 )
 
+    def test_resume_all_after_configuration(self):
+        cases = [
+            ({"auto_resume_on_start": "true"}, {}, True, True),
+            (
+                {"auto_resume_on_start": "true"},
+                {"auto_resume_on_start": "true"},
+                False,
+                True,
+            ),
+            ({"upload_limit_bytes": "1"}, {"auto_resume_on_start": "true"}, True, True),
+            (
+                {"auto_resume_on_start": "false"},
+                {"auto_resume_on_start": "true"},
+                True,
+                False,
+            ),
+            ({"upload_limit_bytes": "1"}, {}, True, False),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            token_file = Path(folder) / "agent.token"
+            token_file.write_text("private-test-token")
+            for declared, stored, changes, resume in cases:
+                responses = [{}, {"revision": 1, "values": stored}]
+                responses += [{}] * (int(changes) + int(resume))
+                with (
+                    self.subTest(declared=declared, stored=stored),
+                    patch.object(helper.websocket, "create_connection"),
+                    patch.object(
+                        helper.RpcClient, "call", side_effect=responses
+                    ) as calls,
+                ):
+                    helper.apply_settings(
+                        "ws://127.0.0.1:1/rpc", token_file, declared, 6
+                    )
+                    methods = [item.args[0] for item in calls.call_args_list]
+                    expected = ["system.hello", "daemon.config.get"]
+                    if changes:
+                        expected.append("daemon.config.patch")
+                    if resume:
+                        expected.append("daemon.task.resumeAll")
+                    self.assertEqual(methods, expected)
+
+    def test_failed_patch_does_not_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            token_file = Path(folder) / "agent.token"
+            token_file.write_text("private-test-token")
+            with (
+                patch.object(helper.websocket, "create_connection"),
+                patch.object(
+                    helper.RpcClient,
+                    "call",
+                    side_effect=[
+                        {},
+                        {"revision": 1, "values": {}},
+                        helper.RpcError({"data": {"code": "invalidArgument"}}),
+                    ],
+                ) as calls,
+            ):
+                with self.assertRaises(helper.ConfigurationError):
+                    helper.apply_settings(
+                        "ws://127.0.0.1:1/rpc",
+                        token_file,
+                        {"auto_resume_on_start": "true"},
+                        6,
+                    )
+                self.assertNotIn(
+                    "daemon.task.resumeAll",
+                    [item.args[0] for item in calls.call_args_list],
+                )
+
     @unittest.skipUnless(
         os.environ.get("FLUXDOWN_TEST_PACKAGE"),
         "Set FLUXDOWN_TEST_PACKAGE for isolated integration tests",
@@ -193,6 +263,7 @@ class SettingsTests(unittest.TestCase):
                                 "upload_limit_bytes": "1048576",
                                 "max_concurrent_tasks": "3",
                                 "bt_enable_upnp": "false",
+                                "auto_resume_on_start": "true",
                             }
                             if iteration == 0
                             else {}

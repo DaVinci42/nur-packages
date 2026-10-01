@@ -124,6 +124,11 @@ def apply_settings(url, token_file, values, protocol, timeout=45):
                     "daemon.config.patch",
                     {"expectedRevision": snapshot["revision"], "values": changes},
                 )
+            auto_resume = values.get(
+                "auto_resume_on_start", snapshot["values"].get("auto_resume_on_start")
+            )
+            if auto_resume in ("true", "1"):
+                client.call("daemon.task.resumeAll")
             return
         except RpcError as error:
             if not error.retryable:

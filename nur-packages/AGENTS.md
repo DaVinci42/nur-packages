@@ -8,6 +8,14 @@
 - Do not modify the central index, consuming configurations, or running services
   unless requested. Keep secrets outside the Nix store.
 
+## Commit style
+
+Use English Conventional Commit titles: `feat:`, `fix:`, `docs:`, `refactor:`,
+`test:`, or `chore:`. Keep titles under 72 characters and describe the outcome.
+Use `feat` for new capabilities and `fix` for corrections. Explain non-obvious
+reasoning in the body. Do not commit, push, or rewrite published history unless
+explicitly requested; use `--force-with-lease` for authorized history rewrites.
+
 ## Updates
 
 AI agents should follow the `Update and validate` section in `README.md` for

@@ -82,6 +82,12 @@ changes. Web UI edits to declared keys last until the next restart. Removing a
 key leaves its stored value unchanged; explicitly set its upstream default to
 reset it. Existing downloads are not moved when `default_save_dir` changes.
 
+When the effective `auto_resume_on_start` is true, the helper calls
+`daemon.task.resumeAll` after successfully applying settings, even if no values
+changed. This resumes all paused tasks, including manually paused tasks, rather
+than only tasks paused by BT session reconfiguration. Explicitly setting it to
+false disables this extra resume step.
+
 For passwords or webhook secrets, use `settingsFile`, an absolute path to a
 runtime JSON object with the same keys and JSON value types. Make it readable by
 the service user (for agenix, set the secret owner to `fluxdown` and mode to
