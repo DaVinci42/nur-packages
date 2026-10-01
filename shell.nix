@@ -12,6 +12,7 @@ pkgs.mkShell {
     basedpyright
     git
     gh
+    act
     (python3.withPackages (packages: [ packages.websocket-client ]))
   ];
 }

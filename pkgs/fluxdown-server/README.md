@@ -134,8 +134,13 @@ To compare a candidate upstream release without writing files, add
 protocol source fail the check and print a diff. Unknown catalog syntax also
 fails instead of silently dropping options. The module rejects managed settings
 when its package version differs from the recorded schema version. This is a
-manual check, not a scheduled upstream monitor; it does not cover every upstream
-configuration surface.
+manual contract check; it does not cover every upstream configuration surface.
+
+The six-hour monitor requires both Linux archives and `SHA256SUMS-server.txt`
+(upstream's Server completion marker), then runs the shared update validation.
+A successful update opens a PR titled `fluxdown-server: old-version -> new-version`
+with its checks listed. Contract changes stop for review. Readiness covers Server,
+not desktop, mobile, or Docker, and does not verify the checksum manifest contents.
 
 Lightweight regression test:
 

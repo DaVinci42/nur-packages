@@ -1,5 +1,14 @@
 # NUR package maintenance
 
+## Priority 0: simplicity
+
+- Concise code and low cyclomatic complexity are the highest design priority.
+- Prefer early errors, guard clauses, and a short, linear execution path.
+- Reuse existing workflows; remove redundant checks, branches, and abstractions.
+- Keep functions focused, but do not split code solely to game complexity metrics.
+- Preserve correctness, security, and required validation when simplifying.
+- Review the entire diff, including new files, against these rules before finishing.
+
 - Keep packages in `pkgs/<name>/`, NixOS modules in `modules/`, and tests in
   `tests/`. Export packages and module paths from `default.nix`.
 - Keep module exports evaluable with `pkgs = null`; use the caller's `pkgs`.
