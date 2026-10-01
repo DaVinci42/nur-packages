@@ -10,13 +10,20 @@
 
 ## Commit style
 
-Use English Conventional Commit titles: `feat:`, `fix:`, `docs:`, `refactor:`,
-`test:`, or `chore:`. Keep titles under 72 characters and describe the outcome.
+For package version updates, use `pkg-name: old-ver -> new-ver`, with the package
+attribute and actual versions, without a Conventional Commit prefix.
+For other changes, use English Conventional Commit titles: `feat:`, `fix:`,
+`docs:`, `refactor:`, `test:`, or `chore:`.
+Keep titles under 72 characters and describe the outcome.
 Use `feat` for new capabilities and `fix` for corrections. Explain non-obvious
 reasoning in the body. Do not commit, push, or rewrite published history unless
 explicitly requested; use `--force-with-lease` for authorized history rewrites.
 
 ## Updates
+
+For package updates and upstream checks, load
+`.agents/skills/nur-package-update/SKILL.md` before proceeding. It guides review
+and validation through the existing commands; package READMEs retain exceptions.
 
 Use `nix-shell --run 'just update <name>'` and the package's `maintenance.toml`.
 Read the package README for exceptions. Review contract changes before using
