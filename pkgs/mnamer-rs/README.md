@@ -31,5 +31,6 @@ updates, not builds. Review the manifest, Rust requirement and CLI/configuration
 changes; revisit version selection when stable v3 is released.
 
 Build and installed version/help tests pass on `x86_64-linux`. `aarch64-linux`
-passes evaluation only. Upstream unit suites, online metadata requests and media
-operations are not tested.
+and `aarch64-darwin` pass evaluation only; native builds and runtime tests remain
+unverified. Upstream unit suites, online metadata requests and media operations
+are not tested.
